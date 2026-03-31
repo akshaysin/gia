@@ -67,38 +67,73 @@ Override settings via environment variables in `docker-compose.yml` → `gia.env
 
 | Variable | Default | Description |
 |---|---|---|
-| `CHAT_MODEL` | `phi4-mini:3.8b` | Chat model |
+| `CHAT_MODEL` | `auto` | Chat model — `auto` selects based on available VRAM (see below) |
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding model |
+| `EMBED_DIM` | `0` | Embedding dimensions (`0` = full 768; set `256` or `384` for lower memory) |
 | `TOP_K` | `5` | Knowledge chunks per query |
-| `SIMILARITY_THRESHOLD` | `0.3` | Minimum cosine similarity |
+| `SIM_THRESHOLD` | `0.3` | Minimum cosine similarity |
 | `HISTORY_TURNS` | `8` | Conversation turns kept in context |
 | `CODE_STYLE` | `monokai` | Syntax highlight theme |
 
-Example — use a different model:
+Example — use a specific model:
 
 ```yaml
 environment:
   CHAT_MODEL: qwen2.5-coder:7b
 ```
 
+### Auto Model Selection
+
+When `CHAT_MODEL=auto` (the default), gia detects your GPU VRAM via `nvidia-smi` and picks the best model:
+
+| VRAM | Model | Size |
+|---|---|---|
+| ≥ 8 GB | `qwen2.5-coder:7b` | Large |
+| ≥ 3.5 GB | `phi4-mini:3.8b` | Default |
+| < 3.5 GB / CPU only | `qwen2.5:1.5b` | Tiny |
+
+Set `CHAT_MODEL` explicitly to override.
+
+### Matryoshka Embedding Dimensions
+
+The default embedding dimension is 768. If you're running on constrained hardware or scaling to a large knowledge base, you can reduce it:
+
+```yaml
+environment:
+  EMBED_DIM: 256    # 3× less memory, ~5% quality trade-off
+```
+
+> **Note:** Changing `EMBED_DIM` requires re-vectorizing: `make vectorize`
+
 ## Architecture
 
 ```
 docker-compose.yml
-┌────────────────────────────────────────────────────┐
-│                                                    │
-│  ollama (model server)  ◄──►  gia (chat + RAG)    │
-│  ├─ phi4-mini:3.8b              ├─ chat.py        │
-│  └─ nomic-embed-text            ├─ vectorize.py   │
-│                                 └─ knowledge.db   │
-│                                                    │
-└────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                                                              │
+│  ollama (model server)  ◄──────►  gia (chat + RAG)          │
+│  ├─ phi4-mini:3.8b (auto)            ├─ chat.py             │
+│  └─ nomic-embed-text                 ├─ vectorize.py        │
+│                                      ├─ knowledge.db        │
+│                                      └─ VectorIndex (numpy) │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-1. Your question is embedded into a 768-dim vector via `nomic-embed-text`
-2. Cosine similarity search finds the top-K relevant chunks from `knowledge.db`
-3. Matched context is passed to `phi4-mini:3.8b` for answer generation
+1. Your question is embedded into a vector via `nomic-embed-text`
+2. Numpy vectorized cosine similarity finds the top-K relevant chunks from an in-memory index
+3. Matched context is passed to the auto-selected chat model for answer generation
 4. Response streams live with full markdown and syntax highlighting
+
+### Performance
+
+All embeddings are loaded into a numpy matrix at startup. Search uses a single BLAS matrix-vector multiply instead of per-row Python loops. Repeated queries hit an LRU cache and skip the embedding API entirely.
+
+| Metric | Before | After |
+|---|---|---|
+| Retrieval | 278 ms | **0.5 ms** (556× faster) |
+| Embedding (cached) | 298 ms | **0 ms** |
+| Pipeline (end-to-end) | 8.9 s | **6.5 s** (28% faster) |
 
 ## Without Make
 
