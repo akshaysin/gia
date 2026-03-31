@@ -1,0 +1,30 @@
+services:
+
+  # ── Ollama model server ──────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - gia_ollama_models:/root/.ollama
+    restart: unless-stopped
+
+  # ── gia chat agent ───────────────────────────────────────────────────────────
+  gia:
+    image: akshaysin/gia:latest
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      # Override any config.py default here if needed:
+      # EMBED_MODEL: nomic-embed-text
+      # CHAT_MODEL: phi4-mini:3.8b
+      # TOP_K: 5
+      # SIMILARITY_THRESHOLD: "0.3"
+      # HISTORY_TURNS: "8"
+      # WRAP_WIDTH: "90"
+      # CODE_STYLE: monokai
+    stdin_open: true
+    tty: true
+
+volumes:
+  # Ollama model cache — survives container restarts and image upgrades
+  gia_ollama_models:

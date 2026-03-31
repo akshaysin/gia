@@ -1,0 +1,21 @@
+# docker-compose.gpu.yml — NVIDIA GPU override
+# Usage:  docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm gia
+#         make chat-gpu
+#
+# Requirements on the host:
+#   - NVIDIA driver installed
+#   - nvidia-container-toolkit ≥ 1.14  (Docker) or CDI spec generated (Podman)
+#     sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+
+services:
+  ollama:
+    environment:
+      # Flash attention reduces VRAM usage and improves throughput on Pascal+ GPUs
+      OLLAMA_FLASH_ATTENTION: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

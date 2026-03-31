@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# PDFs — large binaries; download separately (see README)
+knowledge/**/*.pdf
+
+# DB backups
+*.db.bak
+
+# Environment secrets
+.env
+.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
