@@ -7,13 +7,14 @@ RAG-powered CLI agent using Ollama + local SQLite vector store.
 import os
 import sys
 import json
-import math
 import struct
 import sqlite3
 import readline
 import threading
 import time
+import functools
 import requests
+import numpy as np
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -26,7 +27,7 @@ from rich.style import Style
 # ── Configuration ─────────────────────────────────────────────────────────────
 from config import (
     DB_PATH, OLLAMA_URL, EMBED_MODEL, CHAT_MODEL,
-    TOP_K, SIM_THRESHOLD, HISTORY_TURNS, WRAP_WIDTH, CODE_STYLE,
+    TOP_K, SIM_THRESHOLD, HISTORY_TURNS, WRAP_WIDTH, CODE_STYLE, EMBED_DIM,
 )
 
 # ── Persona ────────────────────────────────────────────────────────────────────
@@ -103,42 +104,67 @@ class Spinner:
         sys.stdout.flush()
 
 # ── Embedding & search ─────────────────────────────────────────────────────────
-def get_embedding(text: str) -> list[float]:
+@functools.lru_cache(maxsize=128)
+def get_embedding(text: str) -> tuple[float, ...]:
     resp = requests.post(
         f"{OLLAMA_URL}/api/embed",
         json={"model": EMBED_MODEL, "input": text},
         timeout=120,
     )
     resp.raise_for_status()
-    return resp.json()["embeddings"][0]
+    emb = resp.json()["embeddings"][0]
+    if EMBED_DIM > 0:
+        emb = emb[:EMBED_DIM]
+    return tuple(emb)
 
 def blob_to_embedding(blob: bytes) -> list[float]:
     n = len(blob) // 4
     return list(struct.unpack(f"{n}f", blob))
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na  = math.sqrt(sum(x * x for x in a))
-    nb  = math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
+# ── Vector index (pre-loaded at startup) ───────────────────────────────────────
+class VectorIndex:
+    """In-memory numpy index for fast cosine similarity search."""
 
-def search_chunks(conn: sqlite3.Connection, query_emb: list[float]) -> list[dict]:
-    rows = conn.execute(
-        "SELECT file_path, category, chunk_index, content, embedding FROM chunks"
-    ).fetchall()
-    scored = []
-    for fp, cat, idx, content, blob in rows:
-        sim = cosine_similarity(query_emb, blob_to_embedding(blob))
-        if sim >= SIM_THRESHOLD:
-            scored.append({
+    def __init__(self, conn: sqlite3.Connection):
+        rows = conn.execute(
+            "SELECT file_path, category, chunk_index, content, embedding FROM chunks"
+        ).fetchall()
+        self._meta = []
+        embeddings = []
+        for fp, cat, idx, content, blob in rows:
+            emb = blob_to_embedding(blob)
+            if EMBED_DIM > 0:
+                emb = emb[:EMBED_DIM]
+            embeddings.append(emb)
+            self._meta.append({
                 "file_path":   fp,
                 "category":    cat,
                 "chunk_index": idx,
                 "content":     content,
-                "similarity":  sim,
             })
-    scored.sort(key=lambda x: x["similarity"], reverse=True)
-    return scored[:TOP_K]
+        self._matrix = np.array(embeddings, dtype=np.float32)          # (N, D)
+        self._norms  = np.linalg.norm(self._matrix, axis=1)            # (N,)
+        self._norms[self._norms == 0] = 1.0  # avoid div-by-zero
+
+    @property
+    def count(self) -> int:
+        return len(self._meta)
+
+    def search(self, query_emb: tuple[float, ...]) -> list[dict]:
+        q = np.array(query_emb, dtype=np.float32)
+        q_norm = np.linalg.norm(q)
+        if q_norm == 0:
+            return []
+        sims = (self._matrix @ q) / (self._norms * q_norm)            # (N,)
+        mask = sims >= SIM_THRESHOLD
+        indices = np.where(mask)[0]
+        if len(indices) == 0:
+            return []
+        top_idx = indices[np.argsort(sims[indices])[::-1][:TOP_K]]
+        return [
+            {**self._meta[i], "similarity": float(sims[i])}
+            for i in top_idx
+        ]
 
 def build_context(results: list[dict]) -> str:
     if not results:
@@ -169,14 +195,14 @@ def _build_panel(answer: str, done: bool = False) -> Panel:
     )
 
 def stream_answer(
-    conn: sqlite3.Connection,
+    index: VectorIndex,
     question: str,
     conversation: list[dict],
 ) -> tuple[str, list[dict], dict]:
     """Embed → retrieve → stream with live-updating markdown panel."""
     with Spinner("Searching knowledge base…"):
         query_emb = get_embedding(question)
-        results   = search_chunks(conn, query_emb)
+        results   = index.search(query_emb)
         context   = build_context(results)
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -301,9 +327,15 @@ def print_help():
 
 # ── Main REPL ──────────────────────────────────────────────────────────────────
 def main():
+    global CHAT_MODEL
     if not os.path.exists(DB_PATH):
         console.print("\n  [red]✗ Knowledge database not found. Run vectorize.py first.[/]\n")
         sys.exit(1)
+
+    # Resolve auto model selection
+    if CHAT_MODEL == "auto":
+        from pull_models import resolve_chat_model
+        CHAT_MODEL = resolve_chat_model()
 
     conn = sqlite3.connect(DB_PATH)
     chunk_count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
@@ -320,12 +352,27 @@ def main():
         console.print(f"\n    [dim]Rebuild:  rm knowledge.db && python3 vectorize.py[/]\n")
         sys.exit(1)
 
+    # Guard: ensure embed dimension matches
+    dim_str = str(EMBED_DIM) if EMBED_DIM > 0 else "full"
+    dim_row = conn.execute("SELECT value FROM meta WHERE key = 'embed_dim'").fetchone()
+    if dim_row and dim_row[0] != dim_str:
+        console.print(f"\n  [red]✗ Embed dimension mismatch![/]")
+        console.print(f"    [dim]DB built with : {dim_row[0]}[/]")
+        console.print(f"    [dim]Currently set : {dim_str}[/]")
+        console.print(f"\n    [dim]Rebuild:  rm knowledge.db && python3 vectorize.py[/]\n")
+        sys.exit(1)
+        sys.exit(1)
+
     cats = conn.execute(
         "SELECT category, COUNT(*) FROM chunks GROUP BY category ORDER BY category"
     ).fetchall()
 
+    # Pre-load vector index into memory (numpy matrix)
+    with Spinner("Loading vector index…"):
+        index = VectorIndex(conn)
+
     clear_screen()
-    print_banner(chunk_count, cats)
+    print_banner(index.count, cats)
 
     conversation = []
     last_results = []
@@ -357,7 +404,7 @@ def main():
             last_results = []
             turn = 0
             clear_screen()
-            print_banner(chunk_count, cats)
+            print_banner(index.count, cats)
             console.print("[dim]  Conversation cleared.[/]\n")
             continue
 
@@ -391,7 +438,7 @@ def main():
         console.rule(style="dim")
         t_start = time.perf_counter()
         try:
-            answer, last_results, final_data = stream_answer(conn, question, conversation)
+            answer, last_results, final_data = stream_answer(index, question, conversation)
             elapsed = time.perf_counter() - t_start
 
             conversation.append({"role": "user",      "content": question})

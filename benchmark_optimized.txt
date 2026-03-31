@@ -1,0 +1,95 @@
+╔══════════════════════════════════════════════╗
+║        RAG Pipeline Benchmark                ║
+╠══════════════════════════════════════════════╣
+║  Embed model: nomic-embed-text              ║
+║  Chat model:  phi4-mini:3.8b                ║
+║  Queries:     5                             ║
+╚══════════════════════════════════════════════╝
+
+Knowledge DB: 2517 chunks
+Index loaded: 2517 vectors in 157.8ms
+
+
+──────────────────── 1. EMBEDDING SPEED ────────────────────
+   660.4ms  dim=768  ~10 words  │ How do I check if a systemd service is running?
+    43.3ms  dim=768  ~9 words  │ Show me how to open a firewall port permanently
+    46.2ms  dim=768  ~9 words  │ How to view logs for a specific Kubernetes pod?
+    44.7ms  dim=768  ~9 words  │ What is the command to restart a Linux service?
+    44.5ms  dim=768  ~9 words  │ How do I debug a pod stuck in CrashLoopBackOff?
+
+  Avg embedding time: 167.8ms
+  Min: 43.3ms  Max: 660.4ms
+
+──────────────────── 2. RETRIEVAL SPEED (numpy vectorized cosine search) ────────────────────
+     0.7ms  top_sim=0.728  │ How do I check if a systemd service is running?
+     0.5ms  top_sim=0.747  │ Show me how to open a firewall port permanently
+     0.4ms  top_sim=0.689  │ How to view logs for a specific Kubernetes pod?
+     0.4ms  top_sim=0.713  │ What is the command to restart a Linux service?
+     0.3ms  top_sim=0.714  │ How do I debug a pod stuck in CrashLoopBackOff?
+
+  Avg retrieval time: 0.5ms
+  Min: 0.3ms  Max: 0.7ms
+
+──────────────────── 3. GENERATION SPEED (full RAG: embed + retrieve + generate) ────────────────────
+...
+  Q: How do I check if a systemd service is running?
+    Pipeline: embed=0.0ms → retrieve=0.4ms → generate=7.16s
+    Total wall time:   7.16s
+    TTFT:              0.0ms
+    Prompt tokens:       462  (  388.8 tok/s)
+    Generated tokens:     78  (   24.0 tok/s)
+    Model load:        2507.1ms
+    Answer length:     310 chars
+....
+  Q: Show me how to open a firewall port permanently
+    Pipeline: embed=0.0ms → retrieve=1.2ms → generate=5.49s
+    Total wall time:   5.49s
+    TTFT:              0.0ms
+    Prompt tokens:       487  (  407.2 tok/s)
+    Generated tokens:     91  (   23.5 tok/s)
+    Model load:        195.1ms
+    Answer length:     376 chars
+.....
+  Q: How to view logs for a specific Kubernetes pod?
+    Pipeline: embed=0.0ms → retrieve=5.9ms → generate=6.25s
+    Total wall time:   6.25s
+    TTFT:              0.0ms
+    Prompt tokens:       527  (  403.4 tok/s)
+    Generated tokens:    100  (   22.6 tok/s)
+    Model load:        197.9ms
+    Answer length:     478 chars
+.....
+  Q: What is the command to restart a Linux service?
+    Pipeline: embed=0.0ms → retrieve=1.2ms → generate=6.56s
+    Total wall time:   6.56s
+    TTFT:              0.0ms
+    Prompt tokens:       579  (  383.3 tok/s)
+    Generated tokens:    100  (   21.7 tok/s)
+    Model load:        195.6ms
+    Answer length:     499 chars
+.....
+  Q: How do I debug a pod stuck in CrashLoopBackOff?
+    Pipeline: embed=0.0ms → retrieve=7.4ms → generate=6.79s
+    Total wall time:   6.80s
+    TTFT:              0.0ms
+    Prompt tokens:       606  (  377.0 tok/s)
+    Generated tokens:    100  (   21.1 tok/s)
+    Model load:        198.9ms
+    Answer length:     434 chars
+
+──────────────────── SUMMARY ────────────────────
+  Queries run:              5
+  Knowledge chunks:         2517
+
+  Avg embedding time:       167.8ms
+  Avg retrieval time:       0.5ms
+  Avg total pipeline time:  6.45s
+
+  Prompt eval:    avg   391.9 tok/s  (avg 532 tokens)
+  Generation:     avg    22.6 tok/s  (avg 94 tokens)
+
+  Total tokens processed:   2661 prompt + 469 generated = 3130
+
+  Avg time-to-first-token:  0.0ms
+
+Done.
