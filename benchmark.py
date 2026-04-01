@@ -6,13 +6,15 @@ Benchmark the DevOps RAG pipeline: embedding speed, retrieval speed, and chat ge
 import os
 import sys
 import time
-import math
 import json
 import struct
 import sqlite3
+import functools
 import requests
+import numpy as np
 
-from config import DB_PATH, OLLAMA_URL, EMBED_MODEL, CHAT_MODEL, BENCH_MAX_TOKENS
+from config import DB_PATH, OLLAMA_URL, EMBED_MODEL, CHAT_MODEL, BENCH_MAX_TOKENS, EMBED_DIM
+from chat import VectorIndex
 
 BENCH_QUERIES = [
     "How do I check if a systemd service is running?",
@@ -27,6 +29,7 @@ You are a senior DevOps engineer assistant. Answer questions using ONLY the prov
 Be concise, practical, and include relevant commands when appropriate."""
 
 
+@functools.lru_cache(maxsize=128)
 def get_embedding(text):
     resp = requests.post(
         f"{OLLAMA_URL}/api/embed",
@@ -34,35 +37,15 @@ def get_embedding(text):
         timeout=120,
     )
     resp.raise_for_status()
-    return resp.json()["embeddings"][0]
-
-
-def blob_to_embedding(blob):
-    n = len(blob) // 4
-    return list(struct.unpack(f"{n}f", blob))
-
-
-def cosine_similarity(a, b):
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
-
-
-def search_chunks(conn, query_emb, top_k=3):
-    rows = conn.execute("SELECT file_path, category, content, embedding FROM chunks").fetchall()
-    scored = []
-    for fp, cat, content, blob in rows:
-        emb = blob_to_embedding(blob)
-        sim = cosine_similarity(query_emb, emb)
-        scored.append({"file": os.path.basename(fp), "category": cat, "content": content, "sim": sim})
-    scored.sort(key=lambda x: x["sim"], reverse=True)
-    return scored[:top_k]
+    emb = resp.json()["embeddings"][0]
+    if EMBED_DIM > 0:
+        emb = emb[:EMBED_DIM]
+    return tuple(emb)
 
 
 def build_context(results):
     return "\n\n".join(
-        f"--- {r['file']} ({r['category']}) ---\n{r['content']}" for r in results
+        f"--- {os.path.basename(r['file_path'])} ({r['category']}) ---\n{r['content']}" for r in results
     )
 
 
@@ -141,6 +124,11 @@ def separator(title=""):
 
 
 def main():
+    global CHAT_MODEL
+    if CHAT_MODEL == "auto":
+        from pull_models import resolve_chat_model
+        CHAT_MODEL = resolve_chat_model()
+
     print("╔══════════════════════════════════════════════╗")
     print("║        RAG Pipeline Benchmark                ║")
     print("╠══════════════════════════════════════════════╣")
@@ -151,7 +139,13 @@ def main():
 
     conn = sqlite3.connect(DB_PATH)
     chunk_count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-    print(f"\nKnowledge DB: {chunk_count} chunks\n")
+    print(f"\nKnowledge DB: {chunk_count} chunks")
+
+    # Pre-load vector index
+    t0 = time.perf_counter()
+    index = VectorIndex(conn)
+    t_load = time.perf_counter() - t0
+    print(f"Index loaded: {index.count} vectors in {fmt_duration(t_load)}\n")
 
     # ── 1. Embedding benchmark ──────────────────────────────
     separator("1. EMBEDDING SPEED")
@@ -169,15 +163,15 @@ def main():
     print(f"  Min: {fmt_duration(min(embed_times))}  Max: {fmt_duration(max(embed_times))}")
 
     # ── 2. Retrieval benchmark ──────────────────────────────
-    separator("2. RETRIEVAL SPEED (cosine search over all chunks)")
+    separator("2. RETRIEVAL SPEED (numpy vectorized cosine search)")
     retrieval_times = []
     for q in BENCH_QUERIES:
         q_emb = get_embedding(q)
         t0 = time.perf_counter()
-        results = search_chunks(conn, q_emb)
+        results = index.search(q_emb)
         elapsed = time.perf_counter() - t0
         retrieval_times.append(elapsed)
-        top_sim = results[0]["sim"] if results else 0
+        top_sim = results[0]["similarity"] if results else 0
         print(f"  {fmt_duration(elapsed):>8s}  top_sim={top_sim:.3f}  │ {q[:50]}")
 
     avg_retrieval = sum(retrieval_times) / len(retrieval_times)
@@ -197,7 +191,7 @@ def main():
         t_embed = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        results = search_chunks(conn, q_emb)
+        results = index.search(q_emb)
         t_retrieve = time.perf_counter() - t0
 
         context = build_context(results)

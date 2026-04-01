@@ -18,7 +18,7 @@ try:
 except ImportError:
     HAS_PYMUPDF = False
 
-from config import DB_PATH, KNOWLEDGE_DIR, OLLAMA_URL, EMBED_MODEL, CHUNK_SIZE, CHUNK_OVERLAP
+from config import DB_PATH, KNOWLEDGE_DIR, OLLAMA_URL, EMBED_MODEL, CHUNK_SIZE, CHUNK_OVERLAP, EMBED_DIM
 
 
 def init_db(conn: sqlite3.Connection):
@@ -47,10 +47,9 @@ def init_db(conn: sqlite3.Connection):
 
 
 def check_embed_model_compat(conn: sqlite3.Connection, model: str):
-    """Abort with a clear message if the DB was built with a different embed model."""
+    """Abort with a clear message if the DB was built with a different embed model or dim."""
     row = conn.execute("SELECT value FROM meta WHERE key = 'embed_model'").fetchone()
     if row is None:
-        # First run — record the model
         conn.execute("INSERT INTO meta (key, value) VALUES ('embed_model', ?)", (model,))
         conn.commit()
     elif row[0] != model:
@@ -60,6 +59,19 @@ def check_embed_model_compat(conn: sqlite3.Connection, model: str):
         print(f"    Currently using   : {model}")
         print(f"\n  The stored vectors are incompatible. Rebuild the DB:")
         print(f"    rm knowledge.db && python3 vectorize.py\n")
+        raise SystemExit(1)
+
+    # Check dimension compatibility
+    dim_str = str(EMBED_DIM) if EMBED_DIM > 0 else "full"
+    dim_row = conn.execute("SELECT value FROM meta WHERE key = 'embed_dim'").fetchone()
+    if dim_row is None:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('embed_dim', ?)", (dim_str,))
+        conn.commit()
+    elif dim_row[0] != dim_str:
+        print(f"\n  ERROR: Embed dimension mismatch!")
+        print(f"    DB was built with : {dim_row[0]}")
+        print(f"    Currently set     : {dim_str}")
+        print(f"\n  Rebuild the DB:  rm knowledge.db && python3 vectorize.py\n")
         raise SystemExit(1)
 
 
@@ -105,14 +117,17 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
 
 
 def get_embedding(text: str) -> list[float]:
-    """Get embedding vector from Ollama."""
+    """Get embedding vector from Ollama, optionally truncated to EMBED_DIM."""
     resp = requests.post(
         f"{OLLAMA_URL}/api/embed",
         json={"model": EMBED_MODEL, "input": text},
         timeout=120,
     )
     resp.raise_for_status()
-    return resp.json()["embeddings"][0]
+    emb = resp.json()["embeddings"][0]
+    if EMBED_DIM > 0:
+        emb = emb[:EMBED_DIM]
+    return emb
 
 
 def embedding_to_blob(embedding: list[float]) -> bytes:

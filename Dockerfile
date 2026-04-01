@@ -7,9 +7,10 @@
 FROM python:3.12-slim AS builder
 
 WORKDIR /build
-COPY requirements.txt .
+COPY requirements.txt requirements-vectorize.txt ./
 
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+# Install all deps (including PyMuPDF) in builder — needed for vectorize step
+RUN pip install --no-cache-dir --prefix=/install -r requirements-vectorize.txt
 
 
 # ══════════════════════════════════════════════════════════════════════════════

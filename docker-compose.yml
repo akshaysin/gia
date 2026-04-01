@@ -14,13 +14,14 @@ services:
       - ollama
     environment:
       OLLAMA_URL: http://ollama:11434
+      CHAT_MODEL: auto
       # Override any config.py default here if needed:
       # EMBED_MODEL: nomic-embed-text
       # CHAT_MODEL: phi4-mini:3.8b
-      # TOP_K: 5
+      # EMBED_DIM: "0"
+      # TOP_K: "5"
       # SIMILARITY_THRESHOLD: "0.3"
       # HISTORY_TURNS: "8"
-      # WRAP_WIDTH: "90"
       # CODE_STYLE: monokai
     stdin_open: true
     tty: true

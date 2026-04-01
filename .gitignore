@@ -24,3 +24,6 @@ knowledge/**/*.pdf
 
 # macOS
 .DS_Store
+
+# MD Files
+ARCHITECTURE.md
