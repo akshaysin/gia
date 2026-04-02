@@ -16,6 +16,9 @@ import functools
 import requests
 import numpy as np
 
+from rich import box
+from rich.align import Align
+from rich.columns import Columns
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -51,6 +54,11 @@ Be direct, dense, and professional. Avoid filler phrases."""
 # ── Rich console ───────────────────────────────────────────────────────────────
 console = Console()
 
+ACCENT = "bright_cyan"
+MUTED = "grey62"
+SUCCESS = "spring_green3"
+WARNING = "bright_yellow"
+
 # ── ANSI Colours (kept for prompt line + minimal legacy use) ───────────────────
 class C:
     RESET   = "\033[0m"
@@ -73,6 +81,36 @@ def _term_width() -> int:
 
 def clear_screen():
     os.system("clear")
+
+
+def _compact_path(path: str) -> str:
+    return path.replace("knowledge/", "") if "knowledge/" in path else path
+
+
+def _short_model_name(model: str) -> str:
+    return model.split(":", 1)[0]
+
+
+def _metric_panel(title: str, value: str, note: str, border_style: str = "bright_blue") -> Panel:
+    body = Text.assemble(
+        (value + "\n", "bold white"),
+        (note, MUTED),
+    )
+    return Panel(
+        Align.left(body),
+        title=f"[bold {ACCENT}]{title}[/]",
+        title_align="left",
+        border_style=border_style,
+        box=box.ROUNDED,
+        padding=(0, 1),
+    )
+
+
+def _info_row(label: str, value: str, value_style: str = "white") -> Text:
+    return Text.assemble(
+        (f"{label}: ", MUTED),
+        (value, value_style),
+    )
 
 # ── Spinner ────────────────────────────────────────────────────────────────────
 class Spinner:
@@ -182,14 +220,15 @@ def build_context(results: list[dict]) -> str:
 def _build_panel(answer: str, done: bool = False) -> Panel:
     """Build a rich Panel containing the streamed answer as rendered Markdown."""
     md = Markdown(answer, code_theme=CODE_STYLE) if answer else Text("⏳", style="dim")
-    subtitle = None if done else "[dim italic]generating…[/]"
+    subtitle = "[italic grey62]response complete[/]" if done else "[italic grey62]streaming response…[/]"
     return Panel(
         md,
-        title="[bold bright_cyan]gia[/]",
+        title=f"[bold {ACCENT}]gia[/] [grey62]// answer[/]",
         title_align="left",
         subtitle=subtitle,
         subtitle_align="right",
-        border_style="bright_blue",
+        border_style=ACCENT if not done else SUCCESS,
+        box=box.HEAVY,
         padding=(1, 2),
         expand=True,
     )
@@ -256,25 +295,42 @@ def _sim_bar(sim: float, width: int = 10) -> str:
 def print_sources(results: list[dict]):
     if not results:
         return
-    tbl = Table(show_header=False, border_style="dim", box=None, padding=(0, 1))
-    tbl.add_column("bar", width=12)
-    tbl.add_column("score", width=7)
-    tbl.add_column("source")
+    tbl = Table(
+        show_header=True,
+        header_style=f"bold {ACCENT}",
+        border_style="grey35",
+        box=box.SIMPLE_HEAVY,
+        padding=(0, 1),
+        expand=True,
+    )
+    tbl.add_column("match", width=12)
+    tbl.add_column("score", width=7, justify="right")
+    tbl.add_column("source", min_width=22)
+    tbl.add_column("chunk", width=7, justify="right")
+    tbl.add_column("preview", ratio=1)
     for r in results:
         fname = os.path.basename(r["file_path"])
-        cat   = r["category"]
-        sim   = r["similarity"]
+        cat = r["category"]
+        sim = r["similarity"]
         style = _sim_style(sim)
+        preview = " ".join(r["content"].split())
+        if len(preview) > 84:
+            preview = preview[:84].rstrip() + "…"
         tbl.add_row(
             Text(_sim_bar(sim), style=style),
             Text(f"{sim:.3f}", style=style),
             Text(f"{cat}/{fname}", style="white"),
+            Text(str(r["chunk_index"]), style=MUTED),
+            Text(preview, style=MUTED),
         )
     console.print(Panel(
         tbl,
-        title="[dim]Sources[/]",
+        title=f"[bold {ACCENT}]Retrieved Context[/]",
         title_align="left",
-        border_style="dim",
+        subtitle=f"[grey62]{len(results)} chunk(s) above threshold[/]",
+        subtitle_align="right",
+        border_style="grey35",
+        box=box.ROUNDED,
         padding=(0, 1),
     ))
 
@@ -287,30 +343,64 @@ def print_stats(final_data: dict, elapsed: float):
     gen_tps      = eval_count / (eval_ns / 1e9) if eval_ns else 0
     prompt_tps   = prompt_count / (prompt_ns / 1e9) if prompt_ns else 0
     total_tokens = prompt_count + eval_count
+    cache = get_embedding.cache_info()
+    panels = [
+        _metric_panel("Latency", f"{elapsed:.1f}s", "end-to-end wall time"),
+        _metric_panel("Generation", f"{gen_tps:.0f} tok/s", f"{eval_count} output tokens", border_style=SUCCESS),
+        _metric_panel("Prompt", f"{prompt_tps:.0f} tok/s", f"{prompt_count} context tokens", border_style=WARNING),
+        _metric_panel("Embedding Cache", f"{cache.hits}/{cache.currsize}", f"hits / entries, {cache.misses} misses", border_style="cyan"),
+    ]
+    console.print(Columns(panels, equal=True, expand=True, padding=(0, 1)))
     console.print(
-        f"  [dim]tokens:[/] [bright_yellow]{total_tokens}[/]"
-        f"  [dim]gen:[/] [bright_yellow]{gen_tps:.0f} tok/s[/]"
-        f"  [dim]prompt:[/] [bright_yellow]{prompt_tps:.0f} tok/s[/]"
-        f"  [dim]time:[/] [bright_yellow]{elapsed:.1f}s[/]"
+        Text.assemble(
+            ("  total tokens ", MUTED),
+            (str(total_tokens), f"bold {WARNING}"),
+            ("  |  model ", MUTED),
+            (_short_model_name(CHAT_MODEL), "white"),
+        )
     )
 
 # ── Banner ─────────────────────────────────────────────────────────────────────
 def print_banner(chunk_count: int, cats: list[tuple]):
-    cat_parts = "  ".join(f"[cyan]{cat}[/] [dim]{n}[/]" for cat, n in cats)
-    body = (
-        f"[bold bright_cyan]g i a[/]  ·  DevOps & Endpoint Security Expert\n"
-        f"[dim]model: {CHAT_MODEL}  ·  {chunk_count:,} knowledge chunks indexed[/]\n\n"
-        f"{cat_parts}\n\n"
-        f"[dim]commands:[/]  [cyan]help[/]  ·  [cyan]sources[/]  ·  "
-        f"[cyan]clear[/]  ·  [cyan]history[/]  ·  [cyan]quit[/]"
+    top_categories = sorted(cats, key=lambda item: item[1], reverse=True)[:6]
+    cat_table = Table.grid(expand=True)
+    cat_table.add_column(style=ACCENT, ratio=2)
+    cat_table.add_column(style="white", justify="right")
+    for cat, count in top_categories:
+        cat_table.add_row(cat, f"{count:,}")
+
+    summary = Table.grid(padding=(0, 1))
+    summary.add_row(_info_row("mode", "local RAG", SUCCESS))
+    summary.add_row(_info_row("chat", CHAT_MODEL, "white"))
+    summary.add_row(_info_row("embed", EMBED_MODEL, "white"))
+    summary.add_row(_info_row("index", f"{chunk_count:,} chunks", WARNING))
+
+    hero = Text()
+    hero.append("gia\n", style=f"bold {ACCENT}")
+    hero.append("DevOps and Endpoint Security copilot\n", style="bold white")
+    hero.append("Local answers, cited sources, zero external data flow.", style=MUTED)
+
+    command_bar = Text.assemble(
+        ("help", ACCENT), ("  ", MUTED),
+        ("sources", ACCENT), ("  ", MUTED),
+        ("clear", ACCENT), ("  ", MUTED),
+        ("history", ACCENT), ("  ", MUTED),
+        ("quit", ACCENT),
     )
+
+    body = Columns([
+        Panel(Align.left(hero), border_style=ACCENT, box=box.SQUARE, padding=(1, 2)),
+        Panel(summary, title=f"[bold {ACCENT}]Runtime[/]", title_align="left", border_style="grey35", box=box.ROUNDED, padding=(1, 1)),
+        Panel(cat_table, title=f"[bold {ACCENT}]Top Categories[/]", title_align="left", border_style="grey35", box=box.ROUNDED, padding=(1, 1)),
+    ], equal=True, expand=True, padding=(0, 1))
     console.print()
-    console.print(Panel(body, border_style="bright_blue", padding=(1, 2), expand=True))
+    console.print(body)
+    console.print(Panel(command_bar, title=f"[bold {ACCENT}]Commands[/]", title_align="left", border_style="grey35", box=box.ROUNDED, padding=(0, 1), expand=True))
 
 def print_help():
-    tbl = Table(show_header=False, border_style="dim", box=None, padding=(0, 1))
-    tbl.add_column("cmd", style="cyan", width=14)
-    tbl.add_column("desc", style="dim")
+    tbl = Table(show_header=True, header_style=f"bold {ACCENT}", border_style="grey35", box=box.SIMPLE_HEAVY, padding=(0, 1), expand=True)
+    tbl.add_column("command", style=ACCENT, width=14)
+    tbl.add_column("description", style=MUTED)
     for cmd, desc in [
         ("help",       "Show this reference"),
         ("sources",    "Show knowledge sources cited in the last answer"),
@@ -320,9 +410,32 @@ def print_help():
         ("<question>", "Ask anything about DevOps or Endpoint Security"),
     ]:
         tbl.add_row(cmd, desc)
+    tips = Text.assemble(
+        ("Tip: ", f"bold {ACCENT}"),
+        ("Ask specific operational questions like 'show a systemctl command to inspect failed services'.", MUTED),
+    )
     console.print()
-    console.print(Panel(tbl, title="[bold bright_cyan]gia — Command Reference[/]",
-                        title_align="left", border_style="bright_blue", padding=(1, 1)))
+    console.print(Panel(tbl, title=f"[bold {ACCENT}]Command Reference[/]",
+                        title_align="left", border_style=ACCENT, box=box.ROUNDED, padding=(1, 1)))
+    console.print(Panel(tips, border_style="grey35", box=box.SQUARE, padding=(0, 1)))
+    console.print()
+
+
+def print_history(conversation: list[dict]):
+    console.print()
+    for idx in range(0, len(conversation), 2):
+        turn_no = idx // 2 + 1
+        user_msg = conversation[idx]["content"] if idx < len(conversation) else ""
+        assistant_msg = conversation[idx + 1]["content"] if idx + 1 < len(conversation) else ""
+        q = user_msg if len(user_msg) <= 140 else user_msg[:140].rstrip() + "…"
+        a = " ".join(assistant_msg.split())
+        a = a if len(a) <= 240 else a[:240].rstrip() + "…"
+        entry = Table.grid(expand=True)
+        entry.add_row(Text.assemble((f"Turn {turn_no}", f"bold {ACCENT}"), ("  user", MUTED)))
+        entry.add_row(Text(q, style="white"))
+        entry.add_row(Text.assemble(("assistant", MUTED)))
+        entry.add_row(Text(a, style=MUTED))
+        console.print(Panel(entry, border_style="grey35", box=box.ROUNDED, padding=(0, 1)))
     console.print()
 
 # ── Main REPL ──────────────────────────────────────────────────────────────────
@@ -380,8 +493,13 @@ def main():
 
     while True:
         try:
-            prefix   = c(C.BOLD + C.BCYAN, "  you") + c(C.DIM, f"  #{turn + 1}  ❯  ")
-            question = input(prefix).strip()
+            prompt = Text.assemble(
+                ("\n" if turn == 0 else "", "white"),
+                ("you", f"bold {ACCENT}"),
+                (f"  #{turn + 1}", MUTED),
+                ("  > ", "bold white"),
+            )
+            question = console.input(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             console.print(f"\n\n  [dim]Session ended.[/]\n")
             break
@@ -419,19 +537,7 @@ def main():
             if not conversation:
                 console.print("\n  [dim]No history yet.[/]\n")
             else:
-                console.print()
-                console.rule(style="bright_blue")
-                for msg in conversation:
-                    if msg["role"] == "user":
-                        label = "[bold bright_cyan]  you ❯[/]"
-                    else:
-                        label = "[bold bright_green]  gia ❯[/]"
-                    preview = msg["content"][:220].replace("\n", " ")
-                    if len(msg["content"]) > 220:
-                        preview += "…"
-                    console.print(f"{label}  [dim]{preview}[/]")
-                console.rule(style="bright_blue")
-                console.print()
+                print_history(conversation)
             continue
 
         # ── RAG turn ──────────────────────────────────────────────────────────
