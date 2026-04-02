@@ -12,10 +12,13 @@ services:
     image: akshaysin/gia:latest
     depends_on:
       - ollama
+    volumes:
+      - ./:/app:Z
     environment:
       OLLAMA_URL: http://ollama:11434
-      CHAT_MODEL: auto
+      GIA_PROFILE: compat
       # Override any config.py default here if needed:
+      # GIA_PROFILE: balanced
       # EMBED_MODEL: nomic-embed-text
       # CHAT_MODEL: phi4-mini:3.8b
       # EMBED_DIM: "0"

@@ -32,6 +32,10 @@ vectorize:  ## Re-vectorize the knowledge base (after adding new docs)
 bench:  ## Run the RAG pipeline benchmark (CPU)
 	$(COMPOSE) run --rm gia python3 benchmark.py
 
+.PHONY: doctor
+doctor:  ## Check connectivity, model config, and available resources
+	$(COMPOSE) run --rm gia python3 doctor.py
+
 .PHONY: bench-gpu
 bench-gpu:  ## Run the RAG pipeline benchmark (GPU)
 	$(COMPOSE_GPU) run --rm gia python3 benchmark.py

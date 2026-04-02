@@ -19,3 +19,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  gia:
+    environment:
+      GIA_PROFILE: balanced

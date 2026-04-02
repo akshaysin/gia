@@ -14,7 +14,26 @@ cd gia
 docker compose run --rm gia        # or: podman-compose run --rm gia
 ```
 
-First run pulls ~3 GB of models automatically. Subsequent starts are instant.
+First run pulls the required Ollama models automatically. Subsequent starts reuse the persisted model cache.
+
+## CPU-Only Quick Start
+
+For most macOS and Windows users, the default path is the right one:
+
+```bash
+git clone https://github.com/akshaysin/gia.git
+cd gia
+docker compose run --rm gia
+```
+
+What to expect on first launch:
+
+- `gia` starts in a CPU-friendly profile by default
+- the app waits for Ollama, pulls any missing models, then opens the chat UI
+- first startup may take a few minutes depending on network speed and machine performance
+- later launches reuse the model cache stored in the `gia_ollama_models` volume
+
+If you're using Docker Desktop on macOS or Windows, give the Docker VM at least **8 GB RAM** if possible. CPU-only inference works below that, but response times can degrade noticeably.
 
 ## Commands
 
@@ -26,6 +45,9 @@ First run pulls ~3 GB of models automatically. Subsequent starts are instant.
 | `make chat-gpu` | Start gia with NVIDIA GPU acceleration |
 | `make vectorize` | Re-index the knowledge base after adding docs |
 | `make bench` | Performance benchmark |
+| `make bench-gpu` | Performance benchmark with the GPU override |
+| `make doctor` | Check model config, Ollama connectivity, and visible resources |
+| `make setup` | Pull the latest published image |
 | `make down` | Stop all containers |
 
 ### In-chat commands
@@ -63,17 +85,20 @@ make chat-gpu
 
 ## Configuration
 
-Override settings via environment variables in `docker-compose.yml` → `gia.environment`:
+Runtime defaults come from `config.py`, and the compose files can override them via `gia.environment`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `CHAT_MODEL` | `auto` | Chat model — `auto` selects based on available VRAM (see below) |
+| `GIA_PROFILE` | unset in `config.py`, `compat` in `docker-compose.yml`, `balanced` in `docker-compose.gpu.yml` | Friendly model preset |
+| `CHAT_MODEL` | `auto` in local Python runs, `qwen2.5:1.5b` in `docker-compose.yml`, `phi4-mini:3.8b` in `docker-compose.gpu.yml` | Chat model |
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding model |
 | `EMBED_DIM` | `0` | Embedding dimensions (`0` = full 768; set `256` or `384` for lower memory) |
 | `TOP_K` | `5` | Knowledge chunks per query |
-| `SIM_THRESHOLD` | `0.3` | Minimum cosine similarity |
+| `SIMILARITY_THRESHOLD` | `0.3` | Minimum cosine similarity |
 | `HISTORY_TURNS` | `8` | Conversation turns kept in context |
+| `WRAP_WIDTH` | `90` | Terminal wrapping width used by the chat UI |
 | `CODE_STYLE` | `monokai` | Syntax highlight theme |
+| `BENCH_MAX_TOKENS` | `100` | Max generated tokens per benchmark query |
 
 Example — use a specific model:
 
@@ -82,17 +107,34 @@ environment:
   CHAT_MODEL: qwen2.5-coder:7b
 ```
 
-### Auto Model Selection
+### Model Selection
 
-When `CHAT_MODEL=auto` (the default), gia detects your GPU VRAM via `nvidia-smi` and picks the best model:
+`gia` supports a user-friendly profile setting as well as direct model overrides.
 
-| VRAM | Model | Size |
+| Profile | Model | Intended use |
 |---|---|---|
-| ≥ 8 GB | `qwen2.5-coder:7b` | Large |
-| ≥ 3.5 GB | `phi4-mini:3.8b` | Default |
-| < 3.5 GB / CPU only | `qwen2.5:1.5b` | Tiny |
+| `compat` | `qwen2.5:1.5b` | safest CPU-first choice for broad compatibility |
+| `balanced` | `phi4-mini:3.8b` | better quality on stronger CPUs or 4 GB-class NVIDIA GPUs |
+| `quality` | `qwen2.5-coder:7b` | highest quality, expects substantially more resources |
 
-Set `CHAT_MODEL` explicitly to override.
+Compose defaults are explicit so model choice does not depend on cross-container GPU detection:
+
+| Launch mode | Model | Why |
+|---|---|---|
+| `docker compose run --rm gia` | `GIA_PROFILE=compat` → `qwen2.5:1.5b` | safe CPU-first default for broad compatibility |
+| `make chat-gpu` / GPU compose override | `GIA_PROFILE=balanced` → `phi4-mini:3.8b` | better quality on 4 GB-class NVIDIA GPUs |
+| direct local Python run with `CHAT_MODEL=auto` | auto-selected tier | Uses runtime detection from `pull_models.py` |
+
+`CHAT_MODEL` always overrides `GIA_PROFILE` when you want full control.
+
+Example — switch to the balanced profile:
+
+```yaml
+environment:
+  GIA_PROFILE: balanced
+```
+
+`CHAT_MODEL=auto` is still supported in local non-container runs and falls back to runtime hardware detection, but compose files now use explicit profiles.
 
 ### Matryoshka Embedding Dimensions
 
@@ -112,7 +154,7 @@ docker-compose.yml
 ┌──────────────────────────────────────────────────────────────┐
 │                                                              │
 │  ollama (model server)  ◄──────►  gia (chat + RAG)          │
-│  ├─ phi4-mini:3.8b (auto)            ├─ chat.py             │
+│  ├─ qwen2.5:1.5b / phi4-mini:3.8b    ├─ chat.py             │
 │  └─ nomic-embed-text                 ├─ vectorize.py        │
 │                                      ├─ knowledge.db        │
 │                                      └─ VectorIndex (numpy) │
@@ -122,7 +164,7 @@ docker-compose.yml
 
 1. Your question is embedded into a vector via `nomic-embed-text`
 2. Numpy vectorized cosine similarity finds the top-K relevant chunks from an in-memory index
-3. Matched context is passed to the auto-selected chat model for answer generation
+3. Matched context is passed to the configured chat model for answer generation
 4. Response streams live with full markdown and syntax highlighting
 
 ### Performance
@@ -135,6 +177,26 @@ All embeddings are loaded into a numpy matrix at startup. Search uses a single B
 | Embedding (cached) | 298 ms | **0 ms** |
 | Pipeline (end-to-end) | 8.9 s | **6.5 s** (28% faster) |
 
+## Platform Support
+
+| Platform | Status | Notes |
+|---|---|---|
+| macOS Apple Silicon | Recommended | best non-NVIDIA path; use Docker Desktop and the default CPU profile |
+| macOS Intel | Supported | works, but CPU-only response times vary more by hardware |
+| Windows + Docker Desktop | Supported | CPU-only is the default; allocate more Docker VM memory if responses feel slow |
+| Linux without NVIDIA | Supported | default CPU profile works well for general compatibility |
+| Linux with NVIDIA | Best performance | use `make chat-gpu` or the GPU compose override |
+
+## Troubleshooting
+
+Run the built-in diagnostic command to verify Ollama connectivity, model selection, and visible resources:
+
+```bash
+make doctor
+```
+
+This is especially useful on macOS and Windows, where Docker Desktop VM memory settings can strongly affect CPU-only performance.
+
 ## Without Make
 
 ```bash
@@ -142,16 +204,23 @@ All embeddings are loaded into a numpy matrix at startup. Search uses a single B
 docker compose run --rm gia                         # chat
 docker compose run --rm gia python3 vectorize.py    # re-index
 docker compose run --rm gia python3 benchmark.py    # benchmark
+docker compose run --rm gia python3 doctor.py       # diagnostics
+docker compose pull                                 # pull latest image
 
 # Docker — GPU
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm gia
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm gia                  # chat
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm gia python3 benchmark.py  # benchmark
 
 # Podman
 podman-compose run --rm gia
 podman-compose run --rm gia python3 vectorize.py
+podman-compose run --rm gia python3 benchmark.py
+podman-compose run --rm gia python3 doctor.py
+podman-compose pull
 
 # Podman — GPU (requires CDI spec)
-podman-compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm gia
+podman-compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm gia                  # chat
+podman-compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm gia python3 benchmark.py  # benchmark
 ```
 
 ---
