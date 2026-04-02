@@ -14,7 +14,7 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 
-from config import CHAT_MODEL, EMBED_MODEL, OLLAMA_URL, MODEL_TIERS
+from config import CHAT_MODEL, EMBED_MODEL, GIA_PROFILE, OLLAMA_URL, MODEL_TIERS
 
 PULL_TIMEOUT = 3600  # seconds — large models can take a while on first run
 
@@ -48,13 +48,25 @@ def installed_models() -> list[str]:
         return [m["name"] for m in json.loads(resp.read())["models"]]
 
 
+def _model_aliases(model: str) -> set[str]:
+    aliases = {model}
+    if ":" not in model:
+        aliases.add(f"{model}:latest")
+    return aliases
+
+
+def _model_present(present: list[str], model: str) -> bool:
+    aliases = _model_aliases(model)
+    return any(name in aliases for name in present)
+
+
 def pull_if_missing(model: str) -> None:
     try:
         present = installed_models()
     except Exception:
         present = []
 
-    if any(model in n for n in present):
+    if _model_present(present, model):
         print(f"  ✓  {model} — already present", flush=True)
         return
 
@@ -178,10 +190,48 @@ def resolve_chat_model() -> str:
     return model
 
 
+def _profile_label() -> str:
+    if GIA_PROFILE:
+        return GIA_PROFILE
+    if CHAT_MODEL == "auto":
+        return "auto"
+    return "custom"
+
+
+def print_startup_summary(chat_model: str, present: list[str]) -> None:
+    vram = detect_vram_mb()
+    ram = detect_system_ram_mb()
+    launch_mode = "GPU-visible" if vram else "CPU-only"
+    profile = _profile_label()
+    required = [EMBED_MODEL, chat_model]
+    missing = [model for model in required if not _model_present(present, model)]
+
+    print(f"  ⚙  Launch mode: {launch_mode}", flush=True)
+    print(f"  ⚙  Profile: {profile} → chat model {chat_model}", flush=True)
+
+    if missing:
+        print("  ℹ  First startup or model change detected. Missing models will be pulled now.", flush=True)
+        print("  ℹ  This can take several minutes depending on network speed and model size.", flush=True)
+    else:
+        print("  ✓  Using cached Ollama models from the persistent volume.", flush=True)
+
+    if not vram:
+        print("  ℹ  CPU-only mode is expected on macOS/Windows systems without NVIDIA GPU access.", flush=True)
+        if ram and ram < 8192:
+            print("  ⚠  Visible memory is low. In Docker Desktop, allocate at least 8 GB if possible.", flush=True)
+        else:
+            print("  ℹ  If responses feel slow in Docker Desktop, increase the VM memory allocation.", flush=True)
+
+
 if __name__ == "__main__":
     wait_for_ollama()
     print("  🔍  Checking required models…", flush=True)
+    try:
+        present_models = installed_models()
+    except Exception:
+        present_models = []
     chat_model = resolve_chat_model()
+    print_startup_summary(chat_model, present_models)
     pull_if_missing(EMBED_MODEL)
     pull_if_missing(chat_model)
     # Write resolved model so downstream scripts pick it up
