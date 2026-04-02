@@ -14,7 +14,7 @@ services:
       - ollama
     environment:
       OLLAMA_URL: http://ollama:11434
-      CHAT_MODEL: auto
+      CHAT_MODEL: qwen2.5:1.5b
       # Override any config.py default here if needed:
       # EMBED_MODEL: nomic-embed-text
       # CHAT_MODEL: phi4-mini:3.8b

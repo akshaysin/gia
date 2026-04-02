@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 import urllib.error
 import urllib.request
 
@@ -89,16 +90,7 @@ def pull_if_missing(model: str) -> None:
 
 # ── Hardware detection & model auto-selection ──────────────────────────────────
 def detect_vram_mb() -> int:
-    """Query Ollama /api/ps for available GPU VRAM. Returns 0 if no GPU."""
-    try:
-        with urllib.request.urlopen(f"{OLLAMA_URL}/api/ps", timeout=5) as resp:
-            data = json.loads(resp.read())
-        # Ollama reports per-model GPU memory; if nothing loaded, try /api/show
-        # Fall back to checking nvidia-smi via a simple heuristic
-    except Exception:
-        pass
-
-    # Try parsing nvidia-smi (works outside containers too)
+    """Return total visible NVIDIA VRAM in MB, or 0 when no GPU is visible here."""
     try:
         import subprocess
         out = subprocess.check_output(
@@ -111,23 +103,78 @@ def detect_vram_mb() -> int:
         return 0
 
 
+def detect_system_ram_mb() -> int:
+    """Return visible system RAM in MB.
+
+    In containers, prefer the cgroup memory limit when one is set; otherwise fall
+    back to host-visible MemTotal from /proc/meminfo.
+    """
+    cgroup_paths = [
+        "/sys/fs/cgroup/memory.max",  # cgroup v2
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",  # cgroup v1
+    ]
+
+    for path in cgroup_paths:
+        try:
+            raw = Path(path).read_text(encoding="utf-8").strip()
+            if raw and raw != "max":
+                limit_bytes = int(raw)
+                # Ignore effectively-unlimited sentinel values.
+                if 0 < limit_bytes < (1 << 60):
+                    return limit_bytes // (1024 * 1024)
+        except Exception:
+            pass
+
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) // 1024
+    except Exception:
+        pass
+
+    return 0
+
+
+def _auto_select_tier(vram_mb: int, ram_mb: int) -> tuple[str, str]:
+    """Pick a model tier and return the decision reason."""
+    if vram_mb >= 8000:
+        return "large", f"GPU detected ({vram_mb} MB VRAM)"
+    if vram_mb >= 3500:
+        return "default", f"GPU detected ({vram_mb} MB VRAM)"
+
+    # In containerized setups the resolver may run outside the GPU-enabled Ollama
+    # process, so use visible system RAM as a fallback instead of always forcing
+    # the tiny tier.
+    if ram_mb >= 12000:
+        return "default", f"no GPU visible here; falling back to system RAM ({ram_mb} MB)"
+
+    return "tiny", (
+        f"no GPU visible here; system RAM fallback is limited ({ram_mb} MB)"
+        if ram_mb
+        else "no GPU or RAM data available"
+    )
+
+
 def resolve_chat_model() -> str:
     """If CHAT_MODEL is 'auto', pick the best model for available hardware."""
     if CHAT_MODEL != "auto":
         return CHAT_MODEL
 
     vram = detect_vram_mb()
-
-    if vram >= 8000:
-        tier = "large"
-    elif vram >= 3500:
-        tier = "default"
-    else:
-        tier = "tiny"
+    ram = detect_system_ram_mb()
+    tier, reason = _auto_select_tier(vram, ram)
 
     model = MODEL_TIERS[tier]
-    vram_str = f"{vram} MB VRAM" if vram else "no GPU detected"
-    print(f"  🔍  Hardware: {vram_str} → tier '{tier}' → {model}", flush=True)
+    details = []
+    if vram:
+        details.append(f"VRAM {vram} MB")
+    if ram:
+        details.append(f"RAM {ram} MB")
+    hardware = ", ".join(details) if details else "no hardware metrics visible"
+    print(f"  🔍  Hardware: {hardware} → {reason} → tier '{tier}' → {model}", flush=True)
     return model
 
 
