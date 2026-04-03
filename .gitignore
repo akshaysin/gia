@@ -9,7 +9,7 @@ venv/
 env/
 
 # PDFs — large binaries; download separately (see README)
-knowledge/**/*.pdf
+knowledge/**/*.*
 
 # DB backups
 *.db.bak
