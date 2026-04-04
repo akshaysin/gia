@@ -20,8 +20,9 @@ EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 # ── Model tiers for auto-detection ─────────────────────────────────────────────
 MODEL_TIERS = {
     "tiny":    "qwen2.5:1.5b",      # ≤2 GB VRAM / CPU-only
-    "default": "phi4-mini:3.8b",     # 4 GB VRAM
+##    "default": "phi4-mini:3.8b",     # 4 GB VRAM
     "large":   "qwen2.5-coder:7b",  # 8 GB+ VRAM
+    "default": "deepseek-r1:1.5b",     # 4 GB VRAM
 }
 
 PROFILE_MODELS = {
